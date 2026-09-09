@@ -48,6 +48,9 @@
   #ctrls { position:absolute; right:14px; bottom:14px; display:flex; gap:10px; align-items:center;
            background:rgba(0,0,0,.45); padding:8px 12px; border-radius:12px; font-size:12px; }
   #ctrls select { background:#1a2338; color:#fff; border:1px solid #47547a; border-radius:8px; padding:4px 6px; font-family:inherit; }
+  #ctrls button { background:#2a3350; color:#dbe6ff; border:1px solid #47547a; border-radius:8px; padding:5px 9px;
+                  font-family:inherit; font-size:11px; font-weight:700; cursor:pointer; }
+  #ctrls button:active { background:#3b4770; }
   #planeRow { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; width:min(860px,96%); }
   .pl { border:3px solid transparent; border-radius:16px; cursor:pointer; font-family:inherit; font-weight:700;
         background:rgba(255,255,255,.10); color:#dbe6ff; padding:6px 4px 8px; display:flex; flex-direction:column;
@@ -84,6 +87,7 @@
       </select>
     </label>
     <label>민감도 <input id="sens" type="range" min="-15" max="15" value="0" style="width:70px"></label>
+    <button id="btnCal" title="주변 소음에 맞춰 다시 맞춥니다">소리 다시 맞추기</button>
   </div>
 
   <div class="screen" id="scMenu">
@@ -244,7 +248,10 @@ const LEVEL_TIP = ['아주 넓어요','조금 좁아요','더 좁아요','장애
 /* ---------------- 마이크 입력 ---------------- */
 const Mic = {
   ready:false, ctx:null, analyser:null, buf:null, freq:null,
-  vol:0, pitch:0, hasPitch:false,
+  vol:0, pitch:0, hasPitch:false, db:-99,
+  floor:-45,          // 주변 소음 크기(dB) — 자동으로 따라감
+  peak:-25,           // 최근 가장 큰 소리(dB) — 자동으로 따라감
+  calibrate(){ this.floor = -25; this.peak = -99; this.armTimer = 0.5; },
   async init(){
     try{
       const stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
@@ -260,14 +267,34 @@ const Mic = {
       return true;
     }catch(e){ return false; }
   },
-  update(sensDb){
+  update(sensDb, f){
     if(!this.ready) return;
+    const step = f || 1;
     this.analyser.getFloatTimeDomainData(this.buf);
     let sum = 0;
     for(let i=0;i<this.buf.length;i++) sum += this.buf[i]*this.buf[i];
     const rms = Math.sqrt(sum/this.buf.length);
     const db  = 20 * Math.log10(rms + 1e-8);
-    this.vol = Math.max(0, Math.min(1, (db + 55 + sensDb) / 38));
+    this.db = db;
+
+    // 주변 소음(바닥)과 내 큰 소리(꼭대기)를 자동으로 찾아 그 사이를 0~1 로 사용
+    if(db < this.floor)              this.floor += (db - this.floor) * Math.min(1, 0.25*step);
+    else if(db < this.floor + 12)    this.floor += 0.010 * step;      // 조용할 때만 천천히 올림
+    this.floor = Math.max(-75, Math.min(-22, this.floor));
+
+    if(db > this.peak)               this.peak += (db - this.peak) * Math.min(1, 0.30*step);
+    else                             this.peak -= 0.02 * step;        // 큰 소리 기억은 서서히 잊음
+    this.peak = Math.min(-2, this.peak);
+
+    // 보정 직후 0.5초 동안 주변 소음을 재고, 그 값을 기준으로 기본 폭(30dB)을 정함
+    if(this.armTimer > 0){
+      this.armTimer -= step / 60;
+      if(this.armTimer <= 0) this.peak = this.floor + 30;
+    }
+    // 바닥+8dB 부터 올라가기 시작. 꼭대기는 내가 낸 가장 큰 소리를 따라감(폭 8~34dB)
+    const gate = this.floor + 8 - sensDb * 0.4;
+    const top  = Math.min(Math.max(this.peak, this.floor + 16), this.floor + 42) - sensDb * 0.4;
+    this.vol = Math.max(0, Math.min(1, (db - gate) / Math.max(10, top - gate)));
 
     this.analyser.getByteFrequencyData(this.freq);
     const binHz = this.ctx.sampleRate / this.analyser.fftSize;
@@ -360,11 +387,12 @@ function readInput(f){
   const mode = $('mode').value, sens = +$('sens').value;
   let raw = 0;
   if(G.useMic && Mic.ready){
-    Mic.update(sens);
+    Mic.update(sens, f);
     const v = Mic.vol, p = Mic.hasPitch ? Mic.pitch : 0;
     if(mode === 'vol')        raw = v;
     else if(mode === 'pitch') raw = p;
-    else                      raw = Math.max(v * 0.85, p * 0.95);
+    // 크기가 기본, 음높이는 보조(보통 높이보다 높으면 조금 더 올라감)
+    else                      raw = v * 0.88 + (Mic.hasPitch ? (p - 0.35) * 0.35 : 0);
     $('micFill').style.width = Math.round(raw*100) + '%';
     $('micLbl').textContent = '내 소리' + (mode !== 'vol' && Mic.hasPitch
         ? '   ♪ ' + (Mic.pitch > 0.6 ? '높음' : Mic.pitch > 0.3 ? '중간' : '낮음') : '');
@@ -753,6 +781,7 @@ function startLevel(n){
   buildLevel(n); hideAll();
   $('hud').classList.remove('hidden'); $('mic').classList.remove('hidden'); $('ctrls').classList.remove('hidden');
   G.state = 'playing'; last = performance.now();
+  if(Mic.ready) Mic.calibrate();          // 준비 시간 동안 주변 소음을 다시 측정
   if(Mic.ctx && Mic.ctx.state === 'suspended') Mic.ctx.resume();
 }
 function backToList(){
@@ -770,6 +799,7 @@ $('btnStart').onclick = async function(){
 $('btnKey').onclick    = function(){ G.useMic = false; buildPlaneRow(); show('scPlane'); };
 $('btnPlaneOk').onclick= function(){ buildLevelGrid(); show('scLevels'); };
 $('btnPlane').onclick  = function(){ buildPlaneRow(); show('scPlane'); };
+$("btnCal").onclick    = function(){ Mic.calibrate(); blip(520,.06); };
 $('btnAgain').onclick = function(){ startLevel(G.level); };
 $('btnNext').onclick  = function(){ startLevel(Math.min(10, G.level + 1)); };
 $('btnList').onclick  = function(){ backToList(); };
