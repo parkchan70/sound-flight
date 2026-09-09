@@ -87,6 +87,13 @@
       </select>
     </label>
     <label>민감도 <input id="sens" type="range" min="-15" max="15" value="0" style="width:70px"></label>
+    <label>반응
+      <select id="resp">
+        <option value="0.62">아주 부드럽게</option>
+        <option value="0.85" selected>부드럽게</option>
+        <option value="1.15">빠르게</option>
+      </select>
+    </label>
     <button id="btnCal" title="주변 소음에 맞춰 다시 맞춥니다">소리 다시 맞추기</button>
   </div>
 
@@ -239,8 +246,8 @@ function levelConfig(n){
     moveAmp : n >= 4 ? 18 + (n - 4) * 9 : 0,
     moveSpd : 0.5 + k * 0.05,
     blocks  : n >= 7,
-    spring  : 0.055,        // 목표 높이로 따라가는 힘
-    damp    : 0.80          // 흔들림 억제
+    spring  : 0.050,        // 목표 높이로 따라가는 힘
+    damp    : 0.74          // 흔들림 억제
   };
 }
 const LEVEL_TIP = ['아주 넓어요','조금 좁아요','더 좁아요','장애물이 움직여요','움직임+좁음','빨라져요','블록 등장','빠르고 좁음','매우 어려움','최종 도전'];
@@ -383,6 +390,8 @@ function buildLevel(n){
 }
 
 /* ---------------- 입력 ---------------- */
+function respFactor(){ const e = $('resp'); return e ? +e.value : 0.85; }
+
 function readInput(f){
   const mode = $('mode').value, sens = +$('sens').value;
   let raw = 0;
@@ -408,8 +417,11 @@ function readInput(f){
     raw = G.keyHold ? 1 : 0;
     $('micFill').style.width = Math.round(raw*100) + '%';
   }
-  const base = (raw > G.smooth) ? 0.45 : 0.22;
-  G.smooth += (raw - G.smooth) * (1 - Math.pow(1 - base, f || 1));
+  // 목소리는 원래 크기가 계속 떨리므로 천천히 따라가게 해 비행기가 덜 흔들리게 함
+  const r = respFactor();
+  const base = ((raw > G.smooth) ? 0.15 : 0.09) * r;
+  if(Math.abs(raw - G.smooth) > 0.02)                       // 아주 작은 떨림은 무시
+    G.smooth += (raw - G.smooth) * (1 - Math.pow(1 - base, f || 1));
   G.input = Math.max(0, Math.min(1, G.smooth));
 }
 
@@ -439,9 +451,9 @@ function update(dt){
   // 소리 크기/높이 → 목표 높이 (조용하면 아래, 크고 높으면 위)
   const lowY = GROUND - 58, highY = CEIL + 46;
   const targetY = lowY - G.input * (lowY - highY);
-  p.vy += (targetY - p.y) * cfg.spring * f;   // 목표를 향해 부드럽게
-  p.vy *= Math.pow(cfg.damp, f);              // 공기 저항
-  p.vy = Math.max(-13, Math.min(13, p.vy));
+  p.vy += (targetY - p.y) * cfg.spring * respFactor() * f;   // 목표를 향해 부드럽게
+  p.vy *= Math.pow(cfg.damp, f);                             // 공기 저항
+  p.vy = Math.max(-8, Math.min(8, p.vy));                    // 급상승/급강하 제한
   p.y += p.vy * f;
   p.x += cfg.speed * f;
   p.ang = Math.max(-0.5, Math.min(0.6, p.vy * 0.05));
@@ -827,6 +839,15 @@ cv.addEventListener('mousedown', function(){ G.keyHold = true; });
 addEventListener('mouseup', function(){ G.keyHold = false; });
 cv.addEventListener('touchstart', function(e){ G.keyHold = true; e.preventDefault(); }, {passive:false});
 addEventListener('touchend', function(){ G.keyHold = false; });
+
+/* 반응/민감도 설정 기억하기 */
+try {
+  const rs = localStorage.getItem('soundgame_resp'), ss = localStorage.getItem('soundgame_sens');
+  if(rs) $('resp').value = rs;
+  if(ss) $('sens').value = ss;
+} catch(e){}
+$('resp').onchange = function(){ try{ localStorage.setItem('soundgame_resp', this.value); }catch(e){} };
+$('sens').onchange = function(){ try{ localStorage.setItem('soundgame_sens', this.value); }catch(e){} };
 
 /* 저장된 비행기 불러오기 + 시작 화면용 배경 */
 try {
